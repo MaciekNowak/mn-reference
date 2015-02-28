@@ -1,0 +1,1205 @@
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sqlcpr.h>
+#include <sqlda.h>
+#include <sqlca.h>
+
+#define MAX_VNAME_LEN 100
+
+void tableInfo(char *,int,char *);
+void tableInfoII(char *,char *,char *,int);
+void viewInfo(char *,int,char *);
+void synonymInfo(char *,char *);
+void printColumns(char *,char *,int);
+void markPoint(char *,char *,int);
+void sqlErr(void);
+void errMsg(char *,char *,int);
+void infoMsg(char *,char *);
+void usageMsg(char *);
+void finito(int);
+void rmBlanks(char *);
+char *nameToLower(char *);
+
+int		g_debug=0;
+
+int main(int argc, char **argv)
+{
+EXEC SQL begin declare section;
+
+char		*uname;
+char		*passwrd;
+
+EXEC SQL end declare section;
+
+char				c;
+char				*tableName=NULL;
+char				*viewName=NULL;
+char				*synonymName=NULL;
+char				*theOwner=NULL;
+int					sqlSyntax=0;
+
+if(signal(SIGTERM,finito)==SIG_ERR)
+{
+	errMsg("signal SIGTERM",__FILE__,__LINE__);
+}
+
+if(signal(SIGINT,finito)==SIG_ERR)
+{
+	errMsg("signal SIGINT",__FILE__,__LINE__);
+}
+
+uname=passwrd=NULL;
+
+if(argc<=1)
+{
+	usageMsg("no parameters");
+}
+
+while((c=getopt(argc,argv,"t:v:V:s:u:p:o:hd?"))!=EOF)
+{
+	switch(c)
+	{
+		case 't':
+			if((tableName=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(tableName,optarg);
+			break;
+
+		case 'o':
+			if((theOwner=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(theOwner,optarg);
+			break;
+
+		case 'V':
+			sqlSyntax=1;
+	
+		case 'v':
+			if((viewName=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(viewName,optarg);
+			break;
+
+		case 's':
+			if((synonymName=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(synonymName,optarg);
+			break;
+
+		case 'u':
+			if((uname=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(uname,optarg);
+			break;
+
+		case 'p':
+			if((passwrd=malloc(sizeof(char)*(strlen(optarg)+1)))==NULL)
+			{
+				errMsg("malloc",__FILE__,__LINE__);
+			}
+			strcpy(passwrd,optarg);
+			break;
+
+		case 'h':
+			usageMsg("");
+
+		case 'd':
+			g_debug=1;
+			break;
+
+		case '?':
+		default:
+			usageMsg("unknown option");
+	}
+}
+
+if(tableName==NULL && viewName==NULL && synonymName==NULL)
+{
+	usageMsg("no table-name/view-name/synonym-name");
+}
+
+markPoint("BEGINNING",__FILE__,__LINE__);
+
+EXEC SQL whenever sqlerror do sqlErr();
+
+if(uname==NULL || passwrd==NULL)
+{
+	if((uname=malloc(sizeof(char)*2))==NULL)
+	{
+		errMsg("malloc",__FILE__,__LINE__);
+	}
+	strcpy(uname,"/");
+	EXEC SQL connect :uname;
+}
+else
+{
+	EXEC SQL connect :uname identified by :passwrd;
+}
+markPoint("after EXEC SQL connect",__FILE__,__LINE__);
+
+tableInfo(tableName,sqlSyntax,theOwner);
+viewInfo(viewName,sqlSyntax,theOwner);
+synonymInfo(synonymName,theOwner);
+
+markPoint("THE END",__FILE__,__LINE__);
+}
+
+void tableInfo(char *tableName,int sqlSyntax,char *theOwner)
+{
+EXEC SQL begin declare section;
+
+char		selTxt[ 512 ];
+
+struct
+{
+char	owner[ MAX_VNAME_LEN ];
+char	tablespace_name[ MAX_VNAME_LEN ];
+} ts;
+
+struct
+{
+short	owner;
+short	tablespace_name;
+} tsIND;
+
+EXEC SQL end declare section;
+
+int		first;
+char	ownerTxt[ 100 ];
+
+if(tableName==NULL)
+{
+	return;
+}
+
+markPoint("BEGIN tableInfo()",__FILE__,__LINE__);
+
+sprintf(selTxt,"select		owner, tablespace_name \
+					from	all_tables \
+					where	upper(table_name)=upper('%s')",tableName);
+
+if(theOwner!=NULL)
+{
+	strcat(selTxt," and upper(owner)=upper('");
+	strcat(selTxt,theOwner);
+	strcat(selTxt,"')");
+}
+
+markPoint(selTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnTStmt from :selTxt;
+markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+
+EXEC SQL declare mnTCrsr cursor for mnTStmt;
+markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+
+EXEC SQL open mnTCrsr;
+markPoint("after EXEC SQL open mnTCrsr",__FILE__,__LINE__);
+
+first=1;
+
+while(1)
+{
+	EXEC SQL fetch mnTCrsr into	:ts:tsIND;
+
+	if(sqlca.sqlcode==1403)
+	{
+		if(first==1)
+		{
+			EXEC SQL close mnTCrsr;
+			markPoint("after EXEC SQL close mnTCrsr",__FILE__,__LINE__);
+			infoMsg("table",tableName);
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	if(tsIND.owner==-1)
+	{
+		strcpy(ownerTxt,"owner is null");
+	}
+	else
+	{
+		rmBlanks(ts.owner);
+		sprintf(ownerTxt,"owner='%s'",ts.owner);
+	}
+
+	if(tsIND.tablespace_name==-1)
+	{
+		strcpy(ts.tablespace_name,"");
+	}
+	else
+	{
+		rmBlanks(ts.tablespace_name);
+	}
+
+	tableInfoII(tableName,ownerTxt,ts.tablespace_name,sqlSyntax);
+
+	first=0;
+}
+EXEC SQL close mnTCrsr;
+markPoint("after EXEC SQL close mnTCrsr",__FILE__,__LINE__);
+markPoint("END tableInfo",__FILE__,__LINE__);
+}
+
+#define PART_ITEMS_COUNT 4
+
+void tableInfoII(char *tableName,char *ownerTxt,
+				char *tablespace_name,int sqlSyntax)
+{
+EXEC SQL begin declare section;
+
+char		selTxt[ 512 ];
+char		indxSelTxt[ 512 ];
+char		partSelTxt[ 512 ];
+
+int			maxTextLength;
+short		maxTextLengthIND;
+
+struct
+{
+	char	owner[ MAX_VNAME_LEN ];
+	char	index_name[ MAX_VNAME_LEN ];
+	int		column_position;
+	char	column_name[ MAX_VNAME_LEN ];
+	char	uniqueness[ MAX_VNAME_LEN ];
+} tableIndexes;
+
+struct
+{
+	short	owner;
+	short	index_name;
+	short	column_position;
+	short	column_name;
+	short	uniqueness;
+} tableIndexesIND;
+
+struct
+{
+	char	partitioning_type[ MAX_VNAME_LEN ];
+	char	column_name[ MAX_VNAME_LEN ];
+	int		column_position;
+} tablePartKey;
+
+struct
+{
+	short	partitioning_type;
+	short	column_name;
+	short	column_position;
+} tablePartKeyIND;
+
+struct
+{
+	char	tablespace_name[ MAX_VNAME_LEN ];
+	char	partition_name[ MAX_VNAME_LEN ];
+	int		partition_position;
+} tablePart;
+
+EXEC SQL end declare section;
+
+SQLDA				*selectDesc;
+int					first,i;
+char				iName[ MAX_VNAME_LEN ];
+
+if(tableName==NULL)
+{
+	return;
+}
+
+markPoint("BEGIN tableInfoII()",__FILE__,__LINE__);
+
+/*
+ * Columns
+ */
+
+printColumns(tableName,ownerTxt,sqlSyntax);
+
+/*
+ * Indexes 
+ */
+
+printf("\n::::: INDEXES :::::\n");
+
+sprintf(indxSelTxt,"select  ai.owner, ai.index_name, ac.column_position,\
+							ac.column_name, ai.uniqueness \
+					from	all_indexes ai, all_ind_columns ac \
+					where	ai.index_name=ac.index_name and \
+							ai.table_name=ac.table_name and \
+							ai.table_owner=ac.table_owner and \
+							ai.owner=ac.index_owner and \
+							upper(ai.table_name)=upper('%s') and ai.table_%s\
+					order by	ai.uniqueness desc, \
+								ai.index_name, ac.column_position",
+												tableName,ownerTxt);
+
+markPoint(indxSelTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnIStmt from :indxSelTxt;
+markPoint("after EXEC SQL prepare mnIStmt",__FILE__,__LINE__);
+
+EXEC SQL declare mnICrsr cursor for mnIStmt;
+markPoint("after EXEC SQL declare mnICrsr",__FILE__,__LINE__);
+
+EXEC SQL open mnICrsr;
+markPoint("after EXEC SQL open mnICrsr",__FILE__,__LINE__);
+
+while(1)
+{
+	EXEC SQL fetch mnICrsr into :tableIndexes:tableIndexesIND;
+
+	if(sqlca.sqlcode==1403)
+	{
+		break;
+	}
+
+	rmBlanks(tableIndexes.owner);
+	rmBlanks(tableIndexes.index_name);
+	rmBlanks(tableIndexes.column_name);
+	if(tableIndexesIND.uniqueness==-1)
+	{
+		strcpy(tableIndexes.uniqueness,"");
+	}
+	else
+	{
+		rmBlanks(tableIndexes.uniqueness);
+	}
+
+	if(strcmp(iName,tableIndexes.index_name)!=0)
+	{
+		printf("\n%s.%s %s\n",tableIndexes.owner,tableIndexes.index_name,
+												tableIndexes.uniqueness);
+	}
+	printf("    %s\n",tableIndexes.column_name);
+	fflush(NULL);
+	strcpy(iName,tableIndexes.index_name);
+}
+
+printf("\n");
+
+EXEC SQL close mnICrsr;
+markPoint("after EXEC SQL close mnICrsr",__FILE__,__LINE__);
+
+/*
+ * Partitions 
+ */
+
+printf("\n::::: TABLESPACES & PARTITIONS :::::\n");
+
+if(strlen(tablespace_name)>0)
+{
+	printf("\n%s\n\n",tablespace_name);
+}
+else
+{
+	first=1;
+
+	sprintf(partSelTxt,"select  upper(pt.partitioning_type), \
+								pkc.column_name, pkc.column_position \
+						from	all_part_tables pt, all_part_key_columns pkc \
+						where	upper(pt.table_name)=upper('%s') and pt.%s and \
+								pt.table_name=pkc.name and \
+								pt.owner=pkc.owner and \
+								substr(pkc.object_type,1,5)='TABLE' \
+						order by	pkc.column_name, \
+									pkc.column_position", tableName,ownerTxt);
+	
+	markPoint(partSelTxt,__FILE__,__LINE__);
+	
+	EXEC SQL prepare mnQStmt from :partSelTxt;
+	markPoint("after EXEC SQL prepare mnQStmt",__FILE__,__LINE__);
+	
+	EXEC SQL declare mnQCrsr cursor for mnQStmt;
+	markPoint("after EXEC SQL declare mnQCrsr",__FILE__,__LINE__);
+	
+	EXEC SQL open mnQCrsr;
+	markPoint("after EXEC SQL open mnQCrsr",__FILE__,__LINE__);
+	
+	while(1)
+	{
+		EXEC SQL fetch mnQCrsr into :tablePartKey:tablePartKeyIND;
+	
+		if(sqlca.sqlcode==1403)
+		{
+			break;
+		}
+	
+		if(tablePartKeyIND.partitioning_type==-1)
+		{
+			strcpy(tablePartKey.partitioning_type,"");
+		}
+		else
+		{
+			rmBlanks(tablePartKey.partitioning_type);
+		}
+
+		if(tablePartKeyIND.column_name==-1)
+		{
+			strcpy(tablePartKey.column_name,"");
+		}
+		else
+		{
+			rmBlanks(tablePartKey.column_name);
+		}
+
+		if(tablePartKeyIND.column_position==-1)
+		{
+			tablePartKey.column_position=0;
+		}
+	
+		if(first==1)
+		{
+			printf("\nPARTITION BY %s\n    (\n",tablePartKey.partitioning_type);
+		}
+		printf("    %s\n",tablePartKey.column_name);
+		fflush(NULL);
+		first=0;
+	}
+	
+	printf("    )\n");
+	
+	EXEC SQL close mnQCrsr;
+	markPoint("after EXEC SQL close mnQCrsr",__FILE__,__LINE__);
+
+	sprintf(selTxt,"select max(high_value_length) from all_tab_partitions \
+				where upper(table_name)=upper('%s') and table_%s",
+														tableName,ownerTxt);
+	markPoint(selTxt,__FILE__,__LINE__);
+	
+	EXEC SQL prepare mnAStmt from :selTxt;
+	markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+	
+	EXEC SQL declare mnACrsr cursor for mnAStmt;
+	markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+	
+	EXEC SQL open mnACrsr;
+	markPoint("after EXEC SQL open mnACrsr",__FILE__,__LINE__);
+	
+	while(1)
+	{
+		EXEC SQL fetch mnACrsr into	:maxTextLength:maxTextLengthIND;
+	
+		if(sqlca.sqlcode==1403 || maxTextLengthIND==-1)
+		{
+			EXEC SQL close mnACrsr;
+			errMsg(selTxt,__FILE__,__LINE__);
+		}
+		break;
+	}
+	EXEC SQL close mnACrsr;
+	markPoint("after EXEC SQL close mnACrsr",__FILE__,__LINE__);
+
+	if((selectDesc=sqlald(PART_ITEMS_COUNT,MAX_VNAME_LEN,MAX_VNAME_LEN))==NULL)
+	{
+		errMsg("sqlald failed",__FILE__,__LINE__);
+	}
+	selectDesc->N=PART_ITEMS_COUNT;
+
+	for(i=0;i<PART_ITEMS_COUNT-1;i++)
+	{
+		if((selectDesc->V[ i ]=(char *)malloc(MAX_VNAME_LEN+1))==NULL)
+		{
+			errMsg("malloc selectDesc->V[ i ]",__FILE__,__LINE__);
+		}
+	}
+	
+	if((selectDesc->V[ 3 ]=(char *)malloc(maxTextLength+2))==NULL)
+	{
+		errMsg("malloc selectDesc->V[ 3 ]",__FILE__,__LINE__);
+	}
+	
+	for(i=0;i<PART_ITEMS_COUNT;i++)
+	{
+		selectDesc->I[ i ]=(short *)malloc(sizeof(short));
+		if(selectDesc->I[ i ]==NULL)
+		{
+			errMsg("malloc selectDesc->I[ i ]",__FILE__,__LINE__);
+		}
+	}
+
+	sprintf(partSelTxt,"select  tablespace_name, partition_name,\
+								partition_position, high_value \
+						from	all_tab_partitions \
+						where	upper(table_name)=upper('%s') and table_%s \
+						order by partition_position", tableName,ownerTxt);
+	
+	markPoint(partSelTxt,__FILE__,__LINE__);
+	
+	EXEC SQL prepare mnPStmt from :partSelTxt;
+	markPoint("after EXEC SQL prepare mnPStmt",__FILE__,__LINE__);
+	
+	EXEC SQL declare mnPCrsr cursor for mnPStmt;
+	markPoint("after EXEC SQL declare mnPCrsr",__FILE__,__LINE__);
+	
+	EXEC SQL open mnPCrsr;
+	markPoint("after EXEC SQL open mnPCrsr",__FILE__,__LINE__);
+	
+	selectDesc->N=PART_ITEMS_COUNT;
+
+	EXEC SQL describe select list for mnPStmt into selectDesc;
+	markPoint("after EXEC SQL describe",__FILE__,__LINE__);
+
+	if(selectDesc->F<0)
+	{
+		errMsg("EXEC SQL describe : selectDesc->F<0",__FILE__,__LINE__);
+	}
+	selectDesc->N=selectDesc->F;
+
+	selectDesc->L[ 0 ]=MAX_VNAME_LEN;
+	selectDesc->L[ 1 ]=MAX_VNAME_LEN;
+	selectDesc->L[ 2 ]=MAX_VNAME_LEN;
+	selectDesc->L[ 3 ]=maxTextLength+1;
+
+	for(i=0;i<selectDesc->F;i++)
+	{
+		selectDesc->T[ i ]=5;
+		memset(selectDesc->V[ i ],'\0',selectDesc->L[ i ]);
+	}
+
+	while(1)
+	{
+		EXEC SQL fetch mnPCrsr using descriptor selectDesc;
+	
+		if(sqlca.sqlcode==1403)
+		{
+			break;
+		}
+		markPoint("after EXEC SQL fetch mnPCrsr",__FILE__,__LINE__);
+	
+		for(i=0;i<selectDesc->N;i++)
+		{
+			if(*(selectDesc->I[ i ])==-1)
+			{
+				switch(i)
+				{
+				case 0 : strcpy(tablePart.tablespace_name,"<NULL>"); break;
+				case 1 : strcpy(tablePart.partition_name,"<NULL>"); break;
+				}
+			}
+			else
+			{
+				switch(i)
+				{
+				case 0 :
+						rmBlanks((char *)(selectDesc->V[ i ]));
+						strcpy(tablePart.tablespace_name,
+							(char *)(selectDesc->V[ i ]));
+						break;
+				case 1 :
+						rmBlanks((char *)(selectDesc->V[ i ]));
+						strcpy(tablePart.partition_name,
+							(char *)(selectDesc->V[ i ]));
+						break;
+				default :
+						*(selectDesc->V[ i ]+selectDesc->L[ i ])='\0';
+				}
+			}
+		}
+
+		if(strcmp(tablePartKey.partitioning_type,"RANGE")==0)
+		{
+			printf("PARTITION %s VALUES LESS THAN (%s) TABLESPACE %s\n",
+										tablePart.partition_name,
+										(char *)(selectDesc->V[ 3 ]),
+										tablePart.tablespace_name);
+		}
+		else
+		{
+			printf("PARTITION %s TABLESPACE %s\n",
+										tablePart.partition_name,
+										tablePart.tablespace_name);
+		}
+		fflush(NULL);
+	}
+	
+	printf("\n");
+	
+	EXEC SQL close mnPCrsr;
+	markPoint("after EXEC SQL close mnPCrsr",__FILE__,__LINE__);
+}
+markPoint("END tableInfoII",__FILE__,__LINE__);
+}
+
+#define VIEW_ITEMS_COUNT 2
+
+void viewInfo(char *viewName,int sqlSyntax,char *theOwner)
+{
+EXEC SQL begin declare section;
+
+char		selTxt[ 512 ];
+int			maxTextLength;
+short		maxTextLengthIND;
+
+EXEC SQL end declare section;
+
+char		ownerTxt[ 100 ];
+SQLDA		*selectDesc;
+int			i;
+
+if(viewName==NULL)
+{
+	return;
+}
+
+markPoint("BEGIN viewInfo()",__FILE__,__LINE__);
+
+sprintf(selTxt,"select max(text_length) from all_views \
+			where upper(view_name)=upper('%s')",viewName);
+
+if(theOwner!=NULL)
+{
+	strcat(selTxt," and upper(owner)=upper('");
+	strcat(selTxt,theOwner);
+	strcat(selTxt,"')");
+}
+
+markPoint(selTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnVStmt from :selTxt;
+markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+
+EXEC SQL declare mnVCrsr cursor for mnVStmt;
+markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+
+EXEC SQL open mnVCrsr;
+markPoint("after EXEC SQL open mnVCrsr",__FILE__,__LINE__);
+
+while(1)
+{
+	EXEC SQL fetch mnVCrsr into	:maxTextLength:maxTextLengthIND;
+
+	if(sqlca.sqlcode==1403 || maxTextLengthIND==-1)
+	{
+		EXEC SQL close mnVCrsr;
+		markPoint("after EXEC SQL close mnVCrsr",__FILE__,__LINE__);
+		infoMsg("view",viewName);
+	}
+	break;
+}
+EXEC SQL close mnVCrsr;
+markPoint("after EXEC SQL close mnVCrsr",__FILE__,__LINE__);
+
+if((selectDesc=sqlald(VIEW_ITEMS_COUNT,MAX_VNAME_LEN,MAX_VNAME_LEN))==NULL)
+{
+	errMsg("sqlald failed",__FILE__,__LINE__);
+}
+selectDesc->N=VIEW_ITEMS_COUNT;
+
+if((selectDesc->V[ 0 ]=(char *)malloc(MAX_VNAME_LEN+1))==NULL)
+{
+	errMsg("malloc selectDesc->V[ 0 ]",__FILE__,__LINE__);
+}
+
+if((selectDesc->V[ 1 ]=(char *)malloc(maxTextLength+1))==NULL)
+{
+	errMsg("malloc selectDesc->V[ 1 ]",__FILE__,__LINE__);
+}
+
+for(i=0;i<VIEW_ITEMS_COUNT;i++)
+{
+	selectDesc->I[ i ]=(short *)malloc(sizeof(short));
+	if(selectDesc->I[ i ]==NULL)
+	{
+		errMsg("malloc selectDesc->I[ i ]",__FILE__,__LINE__);
+	}
+}
+
+sprintf(selTxt,"select owner,text from all_views \
+			where upper(view_name)=upper('%s')",viewName);
+
+if(theOwner!=NULL)
+{
+	strcat(selTxt," and upper(owner)=upper('");
+	strcat(selTxt,theOwner);
+	strcat(selTxt,"')");
+}
+
+markPoint(selTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnVVStmt from :selTxt;
+markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+
+EXEC SQL declare mnVVCrsr cursor for mnVVStmt;
+markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+
+EXEC SQL open mnVVCrsr;
+markPoint("after EXEC SQL open mnVVCrsr",__FILE__,__LINE__);
+
+selectDesc->N=VIEW_ITEMS_COUNT;
+
+EXEC SQL describe select list for mnVVStmt into selectDesc;
+markPoint("after EXEC SQL describe",__FILE__,__LINE__);
+
+if(selectDesc->F<0)
+{
+	errMsg("EXEC SQL describe : selectDesc->F<0",__FILE__,__LINE__);
+}
+selectDesc->N=selectDesc->F;
+
+selectDesc->L[ 0 ]=MAX_VNAME_LEN;
+selectDesc->L[ 1 ]=maxTextLength;
+
+for(i=0;i<selectDesc->F;i++)
+{
+	selectDesc->T[ i ]=5;
+	memset(selectDesc->V[ i ],'\0',selectDesc->L[ i ]);
+}
+
+while(1)
+{
+	EXEC SQL fetch mnVVCrsr using descriptor selectDesc;
+
+	if(sqlca.sqlcode==1403)
+	{
+		break;
+	}
+
+	for(i=0;i<selectDesc->N;i++)
+	{
+		if(*(selectDesc->I[ i ])==-1)
+		{
+			printf("<NULL>\n");
+		}
+		else
+		{
+			if(i==0)
+			{
+				rmBlanks((char *)(selectDesc->V[ i ]));
+				sprintf(ownerTxt,"owner='%s'",(char *)(selectDesc->V[ i ]));
+				if(sqlSyntax)
+				{
+					printf("create view %s.%s\n(\n",
+							nameToLower((char *)(selectDesc->V[ i ])),
+							nameToLower(viewName));
+				}
+				printColumns(viewName,ownerTxt,sqlSyntax);
+				if(sqlSyntax)
+				{
+					printf(")\nas\n");
+				}
+			}
+			else
+			{
+				if(!sqlSyntax)
+				{
+					printf("\n::::: VIEW TEXT :::::\n\n");
+				}
+				*(selectDesc->V[ i ]+selectDesc->L[ i ])='\0';
+				printf("%s\n",(char *)(selectDesc->V[ i ]));
+			}
+		}
+	}
+}
+EXEC SQL close mnVVCrsr;
+markPoint("after EXEC SQL close mnVVCrsr",__FILE__,__LINE__);
+markPoint("END viewInfo",__FILE__,__LINE__);
+}
+
+#define DB_LINK_LEN 129
+
+void synonymInfo(char *synonymName,char *theOwner)
+{
+EXEC SQL begin declare section;
+
+char		sSelTxt[ 512 ];
+
+struct synStructS
+{
+	char	owner[ MAX_VNAME_LEN ];
+	char	synonym_name[ MAX_VNAME_LEN ];
+	char	table_owner[ MAX_VNAME_LEN ];
+	char	table_name[ MAX_VNAME_LEN ];
+	char	db_link[ DB_LINK_LEN ];
+} syns;
+
+struct
+{
+	short	owner;
+	short	synonym_name;
+	short	table_owner;
+	short	table_name;
+	short	db_link;
+} synsIND;
+
+EXEC SQL end declare section;
+
+int					first;
+
+if(synonymName==NULL)
+{
+	return;
+}
+markPoint("BEGIN synonymInfo()",__FILE__,__LINE__);
+
+sprintf(sSelTxt,"select		owner,synonym_name,table_owner,table_name,\
+							db_link \
+					from	all_synonyms \
+					where	upper(synonym_name)=upper('%s') \
+					order by owner,table_name,table_owner",synonymName);
+
+if(theOwner!=NULL)
+{
+	strcat(sSelTxt," and upper(owner)=upper('");
+	strcat(sSelTxt,theOwner);
+	strcat(sSelTxt,"')");
+}
+
+markPoint(sSelTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnSStmt from :sSelTxt;
+markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+
+EXEC SQL declare mnSCrsr cursor for mnSStmt;
+markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+
+EXEC SQL open mnSCrsr;
+markPoint("after EXEC SQL open mnSCrsr",__FILE__,__LINE__);
+
+first=1;
+
+while(1)
+{
+	EXEC SQL fetch mnSCrsr into	:syns:synsIND;
+
+	if(sqlca.sqlcode==1403)
+	{
+		if(first==1)
+		{
+			EXEC SQL close mnSCrsr;
+			markPoint("after EXEC SQL close mnSCrsr",__FILE__,__LINE__);
+			infoMsg("synonym",synonymName);
+		}
+		else
+		{
+			break;
+		}
+	}
+	if(synsIND.owner==-1)				strcpy(syns.owner,"<NULL>");
+	else								rmBlanks(syns.owner);
+
+	if(synsIND.synonym_name==-1)		strcpy(syns.synonym_name,"<NULL>");
+	else								rmBlanks(syns.synonym_name);
+
+	if(synsIND.table_owner==-1)			strcpy(syns.table_owner,"");
+	else								rmBlanks(syns.table_owner);
+
+	if(synsIND.table_name==-1)			strcpy(syns.table_name,"<NULL>");
+	else								rmBlanks(syns.table_name);
+
+	if(synsIND.db_link==-1)				strcpy(syns.db_link,"");
+	else								rmBlanks(syns.db_link);
+
+	printf("\n%s.%s -> ",syns.owner,syns.synonym_name);
+	if(strlen(syns.table_owner)>0)
+	{
+		printf("%s.",syns.table_owner);
+	}
+	printf("%s\n\n",syns.table_name);
+	if(strlen(syns.db_link)>0)
+	{
+		printf("%s\n\n",syns.db_link);
+	}
+
+	first=0;
+}
+EXEC SQL close mnSCrsr;
+markPoint("after EXEC SQL close mnSCrsr",__FILE__,__LINE__);
+markPoint("END synonymInfo",__FILE__,__LINE__);
+}
+
+void printColumns(char *tableName,char *ownerTxt,int sqlSyntax)
+{
+EXEC SQL begin declare section;
+
+char		colSelTxt[ 512 ];
+
+struct tableStructS
+{
+	char	owner[ MAX_VNAME_LEN ];
+	char	column_name[ MAX_VNAME_LEN ];
+	char	data_type[ MAX_VNAME_LEN ];
+	int		data_length;
+	int		data_precision;
+	int		data_scale;
+	char	nullable[ MAX_VNAME_LEN ];
+	int		column_id;
+} tableStruct;
+
+struct
+{
+	short	owner;
+	short	column_name;
+	short	data_type;
+	short	data_length;
+	short	data_precision;
+	short	data_scale;
+	short	nullable;
+	short	column_id;
+} tableStructIND;
+
+EXEC SQL end declare section;
+
+int					first;
+int					maxColNameL=0;
+int					maxTypeL=0;
+char				cName[ MAX_VNAME_LEN ];
+struct tableSchemaS
+{
+	struct tableStructS	column;
+	struct tableSchemaS	*next;
+};
+struct tableSchemaS	*ts,*prevts,*tableSchema=NULL;
+
+sprintf(colSelTxt,"select	owner,column_name,data_type,data_length,\
+							data_precision,data_scale,nullable,column_id \
+					from	all_tab_columns \
+					where	upper(table_name)=upper('%s') and %s \
+					order by column_id",tableName,ownerTxt);
+
+markPoint(colSelTxt,__FILE__,__LINE__);
+
+EXEC SQL prepare mnStmt from :colSelTxt;
+markPoint("after EXEC SQL prepare",__FILE__,__LINE__);
+
+EXEC SQL declare mnCrsr cursor for mnStmt;
+markPoint("after EXEC SQL declare",__FILE__,__LINE__);
+
+EXEC SQL open mnCrsr;
+markPoint("after EXEC SQL open mnCrsr",__FILE__,__LINE__);
+
+first=1;
+
+while(1)
+{
+	EXEC SQL fetch mnCrsr into	:tableStruct:tableStructIND;
+
+	if(sqlca.sqlcode==1403)
+	{
+		if(first==1)
+		{
+			EXEC SQL close mnCrsr;
+			markPoint("after EXEC SQL close mnCrsr",__FILE__,__LINE__);
+			infoMsg("table",tableName);
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	rmBlanks(tableStruct.owner);
+	rmBlanks(tableStruct.column_name);
+
+	if(tableStructIND.data_type==-1)		strcpy(tableStruct.data_type,"-");
+	else									rmBlanks(tableStruct.data_type);
+
+	if(tableStructIND.data_precision==-1)	tableStruct.data_precision=0;
+
+	if(tableStructIND.data_scale==-1)		tableStruct.data_scale=0;
+
+	if(tableStructIND.nullable==-1)			strcpy(tableStruct.nullable,"");
+	else									rmBlanks(tableStruct.nullable);
+
+	if((ts=malloc(sizeof(struct tableSchemaS)))==NULL)
+	{
+		errMsg("malloc",__FILE__,__LINE__);
+	}
+	bcopy((void *)&tableStruct,(void *)&(ts->column),
+						sizeof(struct tableStructS));
+	ts->next=NULL;
+
+	if(tableSchema==NULL)
+	{
+		tableSchema=ts;
+	}
+	else
+	{
+		prevts->next=ts;
+	}
+	prevts=ts;
+
+	if(strlen(ts->column.column_name)>maxColNameL)
+	{
+		maxColNameL=strlen(ts->column.column_name);
+	}
+
+	if(strcmp(ts->column.data_type,"NUMBER")==0)
+	{
+		if(ts->column.data_precision!=0 && ts->column.data_scale!=0)
+		{
+			sprintf(cName,"(%d,%d)",ts->column.data_precision,
+									ts->column.data_scale);
+		}
+		else if(ts->column.data_precision!=0)
+		{
+			sprintf(cName,"(%d)",ts->column.data_precision);
+		}
+		else
+		{
+			strcpy(cName,"");
+		}
+		strcat(ts->column.data_type,cName);
+	}
+	else if(strcmp(ts->column.data_type,"FLOAT")==0)
+	{
+		if(ts->column.data_precision!=0)
+		{
+			sprintf(cName,"(%d)",ts->column.data_precision);
+		}
+		else
+		{
+			strcpy(cName,"");
+		}
+		strcat(ts->column.data_type,cName);
+	}
+	else if(strcmp(ts->column.data_type,"VARCHAR2")==0		||
+			strcmp(ts->column.data_type,"NVARCHAR2")==0		||
+			strcmp(ts->column.data_type,"RAW")==0			||
+			strcmp(ts->column.data_type,"CHAR")==0			||
+			strcmp(ts->column.data_type,"NCHAR")==0			||
+			strcmp(ts->column.data_type,"CHARACTER")==0)
+	{
+		sprintf(cName,"(%d)",ts->column.data_length);
+		strcat(ts->column.data_type,cName);
+	}
+
+	if(strlen(ts->column.data_type)>maxTypeL)
+	{
+		maxTypeL=strlen(ts->column.data_type);
+	}
+
+	first=0;
+}
+
+maxColNameL++;
+maxTypeL++;
+
+if(!sqlSyntax)
+{
+	printf("\n%s.%s\n\n",tableSchema->column.owner,tableName);
+
+	printf("\n::::: COLUMNS :::::\n\n");
+}
+
+for(first=1,ts=tableSchema;ts!=NULL;ts=ts->next)
+{
+	if(!sqlSyntax)
+	{
+		memset(cName,' ',MAX_VNAME_LEN);
+		strncpy(cName,ts->column.column_name,strlen(ts->column.column_name));
+		cName[ maxColNameL-1 ]='\0';
+		printf("%s ",cName);
+
+		memset(cName,' ',MAX_VNAME_LEN);
+		strncpy(cName,ts->column.data_type,strlen(ts->column.data_type));
+		cName[ maxTypeL-1 ]='\0';
+		printf("%s ",cName);
+
+		if(strncmp(ts->column.nullable,"N",1)==0)
+		{
+			printf("NOT NULL");
+		}
+		printf("\n");
+	}
+	else
+	{
+		if(!first)
+		{
+			printf(",\n");
+		}
+		printf("    %s",nameToLower(ts->column.column_name));
+	}
+	first=0;
+}
+
+printf("\n");
+
+EXEC SQL close mnCrsr;
+markPoint("after EXEC SQL close mnCrsr",__FILE__,__LINE__);
+}
+
+void rmBlanks(char *s)
+{
+int	l=strlen(s);
+int i,j=0;
+
+for(i=0;i<l;i++)
+{
+	if(s[ i ]==' ' || s[ i ]=='\t' || s[ i ]=='\n')
+	{
+		continue;
+	}
+	s[ j++ ]=s[ i ];
+}
+s[ j ]='\0';
+}
+
+char *nameToLower(char *s)
+{
+char	*q=s;
+
+while(*q) { *q=tolower(*q); q++; }
+
+return(s);
+}
+
+void markPoint(char *markTxt,char *sourceFile, int sourceLine)
+{
+if(g_debug)
+{
+	fprintf(stderr,"---> DEBUG %s (%s:%d)\n",markTxt,sourceFile,sourceLine);
+}
+}
+
+void sqlErr()
+{
+fprintf(stderr,"%d   %.70s\n",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
+exit(2);
+}
+
+void errMsg(char *errTxt,char *sourceFile, int sourceLine)
+{
+fprintf(stderr,"%s (%s:%d)\n",errTxt,sourceFile,sourceLine);
+exit(1);
+}
+
+void infoMsg(char *objectType, char *objectName)
+{
+fprintf(stderr,"\nthe %s \"%s\" does not exist/not accessible...\n\n",
+												objectType,objectName);
+exit(1);
+}
+
+void usageMsg(char *errTxt)
+{
+fprintf(stderr,"\nUsage:\n");
+fprintf(stderr,"mnschema -t table-name | -v/-V view-name | -s synonym-name \\\n");
+fprintf(stderr,"         [-o owner] [-u user] [-p password] [-d(ebug)] [-h(elp)]\n\n");
+if(strlen(errTxt)>0)
+{
+	fprintf(stderr,"\tError : %s\n\n",errTxt);
+}
+exit(1);
+}
+
+void finito(int i)
+{
+fprintf(stderr,"\n\nExiting...\n\n");
+exit(i);
+}
